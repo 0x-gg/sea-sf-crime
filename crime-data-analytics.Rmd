@@ -1,0 +1,323 @@
+---
+title: "A tale of two cities - Analyzing Crime in Seattle and San Francisco"
+author: "Gaurav Gada"
+date: "4/26/2017"
+output: html_document
+---
+
+```{css}
+<style>
+width: 100vw;
+
+table {
+  overflow-x: scroll !important;
+}
+pre code, pre, code {
+  white-space: pre !important;
+  overflow-x: scroll !important;
+  word-break: keep-all !important;
+  word-wrap: initial !important;
+}
+</style>
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Background
+
+I analyze the crime data for 2016 from the Seattle and San Francisco open data outlets.
+
+First, I load the libraries required for our analysis. In the next steps, I clean the data, create some features and then use additional geospatial data to guide my analysis.
+
+```{r, message=FALSE}
+# Load only things that do not exists. See below:
+# http://stackoverflow.com/a/4090208/1494702
+req.pkg <- c("tidyverse", "ggmap", "lubridate", "randomcoloR", "leaflet", "rgdal", "sp")
+install.diff <- req.pkg[!(req.pkg %in% installed.packages()[,"Package"])]
+if(length(install.diff)) install.packages(install.diff)
+
+require(tidyverse)
+require(ggmap)
+require(lubridate)
+require(randomcoloR)
+require(leaflet)
+require(rgdal)
+require(sp)
+```
+
+Now we load the data files and preview some of the data:
+
+```{r}
+file.name.sea <- "/Users/gauravgada/GitHub/viz-des/01-report/sea_2016.csv"
+sea <- read.csv(file.name.sea)
+
+file.name.sf <- "/Users/gauravgada/GitHub/viz-des/01-report/sf_2016.csv"
+sf <- read.csv(file.name.sf)
+
+knitr::kable(head(sea), format = "markdown")
+knitr::kable(head(sf), format = "markdown")
+```
+
+## Research questions
+
+The questions that I ask of our data are -
+
+1. How does the crime in Seattle and San Francisco vary over the course of the year?
+2. What times of the day are more safe versus what times are more dangerous?
+3. How are crimes geospatially distributed? Do they happen all over the city or are they concentrated in pockets?
+
+---
+
+First I start by cleaning the data.
+
+i. I convert all the time data into datetime that is recognizable by R. This will help me with further analysis.
+ii. I generate some features by splitting the data on hyphens. ex., in the Seattle dataset, I split the column "Offense.Type" on the hyphen.
+
+```{r, warning=FALSE}
+sea <- sea %>%
+  separate(Offense.Type, into = c("Offense.summ", "Offense.det1", "Offense.det2", "Offense.det3"), sep = "-", remove = F)
+
+# http://stackoverflow.com/questions/29111017/convert-string-to-datetime-r
+# http://stackoverflow.com/a/18503822/1494702
+# http://strftime.org/
+
+to.datetime.sea <- function(x) {
+    return(as.POSIXct(x))
+}
+
+sea[c("Date.Reported", "Occurred.Date.or.Date.Range.Start", "Occurred.Date.Range.End")] <- lapply(sea[c("Date.Reported", "Occurred.Date.or.Date.Range.Start", "Occurred.Date.Range.End")], to.datetime.sea)
+
+to.datetime.sf <- function(x) {
+    date.fmt <- "%m/%d/%y %H:%M"
+    return(as.POSIXct(x, format=date.fmt))
+}
+
+sf[c("DateTime")] <- lapply(sf[c("DateTime")], to.datetime.sf)
+```
+
+I sort and gather the top crime types in Seattle and San Francisco. Then I filter on the top-5 crimes to avoid making my time trend graph less cluttered.
+
+```{r}
+sea.sorted <- as.data.frame(sort(table(sea$Offense.summ), decreasing = T))
+
+sf.sorted <- as.data.frame(sort(table(sf$Category), decreasing = T))
+```
+
+```{r}
+sf.top5 <- sf %>%
+  filter(Category %in% sf.sorted$Var1[0:5])
+
+sf.summ.by.hour <- sf.top5 %>%
+group_by(hour(DateTime), Category) %>%
+summarise(cnt = n())
+
+sea.top5 <- sea %>%
+  filter(Offense.summ %in% sea.sorted$Var1[0:5])
+
+sea.summ.by.hour <- sea.top5 %>%
+group_by(hour(Date.Reported), Offense.summ) %>%
+summarise(cnt = n())
+```
+
+We further manipulate the data to make it easier to plot.
+
+```{r}
+colnames(sea.summ.by.hour)[1] = "Hour"
+colnames(sf.summ.by.hour)[1] = "Hour"
+colnames(sea.summ.by.hour)[2] = "Crime"
+colnames(sf.summ.by.hour)[2] = "Crime"
+sf.summ.by.hour$city = "SF"
+sea.summ.by.hour$city = "SEA"
+
+sf.summ.by.hour <- as.data.frame(sf.summ.by.hour)
+sea.summ.by.hour <- as.data.frame(sea.summ.by.hour)
+```
+
+```{r}
+lapply(sf.summ.by.hour, class)
+
+lapply(sea.summ.by.hour, class)
+
+# sf.summ.by.hour$summ <- as.character(sf.summ.by.hour$summ)
+```
+```{r}
+summ.by.hour <- rbind(sf.summ.by.hour, sea.summ.by.hour)
+```
+
+## Seattle and San Francisco's crime by hour.
+
+The below plots show the crime variation by time in the two cities. We find that theft is the most popular crime in both cities. Theft in Seattle peaks during the noon, while it peaks at 6 to 7 PM in San Francisco.
+
+```{r, fig.height=8, fig.width=12}
+n <- 10
+col_vector <- unname(distinctColorPalette(n))
+
+ggplot(summ.by.hour) +
+  geom_line(data = filter(summ.by.hour, city == "SF"), aes(Hour, cnt, group = Crime, color = Crime)) +
+  scale_x_continuous(breaks = seq(0,23,1), minor_breaks = NULL) +
+  scale_y_continuous(breaks = seq(0,3500,500)) +
+  geom_line(data = filter(summ.by.hour, city == "SEA"), aes(Hour, cnt, group = Crime, color = Crime)) +
+  scale_color_manual(values=col_vector) +
+  facet_wrap(~city, scales = "free_x") + theme_bw()
+```
+
+
+```{r}
+sf.summ.by.mnth <- sf.top5 %>%
+group_by(month(DateTime), Category) %>%
+summarise(cnt = n())
+
+sea.summ.by.mnth <- sea.top5 %>%
+group_by(month(Date.Reported), Offense.summ) %>%
+summarise(cnt = n())
+
+colnames(sea.summ.by.mnth)[1] = "Month"
+colnames(sf.summ.by.mnth)[1] = "Month"
+colnames(sea.summ.by.mnth)[2] = "Crime"
+colnames(sf.summ.by.mnth)[2] = "Crime"
+sf.summ.by.mnth$city = "SF"
+sea.summ.by.mnth$city = "SEA"
+
+sf.summ.by.mnth <- as.data.frame(sf.summ.by.mnth)
+sea.summ.by.mnth <- as.data.frame(sea.summ.by.mnth)
+
+summ.by.mnth <- rbind(sf.summ.by.mnth, sea.summ.by.mnth)
+```
+
+```{r, eval=F}
+
+sf.summ.by.mnth <- sf.top5 %>%
+group_by(round((as.numeric(DateTime) - as.numeric(utc))/(60*60*24*30)), Category) %>%
+summarise(cnt = n())
+
+sea.summ.by.mnth <- sea.top5 %>%
+group_by(round(as.numeric((Date.Reported) - as.numeric(utc))/(60*60*24*30)), Offense.summ) %>%
+summarise(cnt = n())
+
+colnames(sea.summ.by.mnth)[1] = "Month"
+colnames(sf.summ.by.mnth)[1] = "Month"
+colnames(sea.summ.by.mnth)[2] = "Crime"
+colnames(sf.summ.by.mnth)[2] = "Crime"
+sf.summ.by.mnth$city = "SF"
+sea.summ.by.mnth$city = "SEA"
+
+sf.summ.by.mnth <- as.data.frame(sf.summ.by.mnth)
+sea.summ.by.mnth <- as.data.frame(sea.summ.by.mnth)
+
+summ.by.mnth <- rbind(sf.summ.by.mnth, sea.summ.by.mnth)
+```
+
+## Seattle and San Francisco's crime by month.
+
+In our further analysis of time trends, we see that crime in Seattle follows strong monthly trends with very little crime happening from January to August. Crime starts peaking in Seattle from September through December. San Francisco on the other hand, does not have any noticeable monthly crime trends.
+
+```{r, fig.height=8, fig.width=12}
+ggplot(summ.by.mnth) +
+  geom_line(data = filter(summ.by.mnth, city == "SF"), aes(Month, cnt, group = Crime, color = Crime)) +
+  scale_x_continuous(breaks = seq(0,12,1), minor_breaks = NULL) +
+  scale_y_continuous(breaks = seq(0,6000,500)) +
+  geom_line(data = filter(summ.by.mnth, city == "SEA"), aes(Month, cnt, group = Crime, color = Crime)) +
+  scale_color_manual(values=col_vector) +
+  facet_wrap(~city, scales = "free_x") + theme_bw()
+```
+
+
+## Geospatial Analysis
+
+For geospatial analysis, we thank Zillow for providing the neighborhood shapefiles. We load the shapefiles into a geospatial dataframe and use leaflet to analyze the crime occurences by neighborhood.
+
+```{r}
+wa.map <- readOGR(dsn = "/Users/gauravgada/GitHub/viz-des/01-report/WA", layer = "ZillowNeighborhoods-WA")
+sea.map <- subset(wa.map, City == "Seattle")
+
+sea.coords <- data.frame(sea$Longitude, sea$Latitude)
+colnames(sea.coords)[1] = "Longitude"
+colnames(sea.coords)[2] = "Latitude"
+coordinates(sea.coords) <- ~ Longitude + Latitude
+proj4string(sea.coords) <- proj4string(sea.map)
+
+sea$neighborhood <- over(sea.coords, sea.map)$Name
+
+ca.map <- readOGR(dsn = "/Users/gauravgada/GitHub/viz-des/01-report/CA", layer = "ZillowNeighborhoods-CA")
+sf.map <- subset(ca.map, City == "San Francisco")
+
+sf.coords <- data.frame(sf$X, sf$Y)
+colnames(sf.coords)[1] = "Longitude"
+colnames(sf.coords)[2] = "Latitude"
+coordinates(sf.coords) <- ~ Longitude + Latitude
+proj4string(sf.coords) <- proj4string(sf.map)
+
+sf$neighborhood <- over(sf.coords, sf.map)$Name
+```
+
+```{r}
+nb.hist <- as.data.frame(sort(table(sea$neighborhood)))
+
+nb.hist <- nb.hist %>%
+  filter(Freq > 0)
+
+sea.map$inst[match(nb.hist$Var1, sea.map$Name)] = nb.hist$Freq
+
+nb.hist <- as.data.frame(sort(table(sf$neighborhood)))
+
+nb.hist <- nb.hist %>%
+  filter(Freq > 0)
+
+sf.map$inst[match(nb.hist$Var1, sf.map$Name)] = nb.hist$Freq
+```
+
+## Crime in Seattle by neighborhood
+
+It seems that crime is not evenly distributed in the city. Downtown Seattle was the crime capital among the Seattle neighborhoods closely followed by Capitol Hill. University District comes third. It would have been interesting to have neighborhood population data to analyze per capita crime rates across these neighborhoods, but I couldn't find that data.
+
+```{r}
+pal <- colorBin("YlOrRd", domain = sea.map$inst, bins = seq(0,9000,1000))
+
+labels <- sprintf(
+  "<strong>%s</strong><br/>%g cases",
+  sea.map$Name, sea.map$inst
+) %>% lapply(htmltools::HTML)
+
+leaflet(sea.map, width = "100%") %>%
+  addProviderTiles(providers$CartoDB.DarkMatterNoLabels) %>%
+  addPolygons(stroke = FALSE,
+              fillOpacity = 0.5,
+              label = labels,
+              fillColor = ~pal(inst),
+              highlight = highlightOptions(
+                weight = 5,
+                color = "#666",
+                dashArray = "",
+                fillOpacity = 0.7,
+                bringToFront = TRUE))
+```
+
+## Crime in San Francisco by neighborhood
+
+Similarly, in San Francisco as well, the crime is concentrated in a few pockets. South of Market neighborhood sees the highest number of crimes followed by Mission and Downtown.
+
+```{r}
+pal <- colorBin("YlOrRd", domain = sf.map$inst, bins = seq(0,18000,2000))
+
+labels <- sprintf(
+  "<strong>%s</strong><br/>%g cases",
+  sf.map$Name, sf.map$inst
+) %>% lapply(htmltools::HTML)
+
+leaflet(sf.map, width = "100%") %>%
+  addProviderTiles(providers$CartoDB.DarkMatterNoLabels) %>%
+  addPolygons(stroke = FALSE,
+              fillOpacity = 0.5,
+              label = labels,
+              fillColor = ~pal(inst),
+              highlight = highlightOptions(
+                weight = 5,
+                color = "#666",
+                dashArray = "",
+                fillOpacity = 0.7,
+                bringToFront = TRUE))
+```
+
+Thanks for following along with my analysis! I hope you enjoyed it.
